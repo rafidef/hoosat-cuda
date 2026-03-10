@@ -1,7 +1,7 @@
 #include "miner.h"
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
-#include <math_functions.hpp>
+#include <math.h>
 #include <stdio.h>
 
 // -------------------------------------------------------------------------
