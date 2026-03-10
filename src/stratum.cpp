@@ -67,33 +67,36 @@ public:
     }
 
     bool connectToPool() {
-        std::lock_guard<std::mutex> lock(net_mutex);
-        
-        sock = socket(AF_INET, SOCK_STREAM, 0);
+        {
+            std::lock_guard<std::mutex> lock(net_mutex);
+            
+            sock = socket(AF_INET, SOCK_STREAM, 0);
 #ifdef _WIN32
-        if (sock == INVALID_SOCKET) return false;
+            if (sock == INVALID_SOCKET) return false;
 #else
-        if (sock < 0) return false;
+            if (sock < 0) return false;
 #endif
 
-        struct sockaddr_in serv_addr;
-        serv_addr.sin_family = AF_INET;
-        serv_addr.sin_port = htons(port);
-        
-        struct hostent *he = gethostbyname(host.c_str());
-        if (he == NULL) {
-            std::cerr << "Failed to resolve host." << std::endl;
-            return false;
-        }
-        struct in_addr **addr_list = (struct in_addr **) he->h_addr_list;
-        serv_addr.sin_addr = *addr_list[0];
+            struct sockaddr_in serv_addr;
+            serv_addr.sin_family = AF_INET;
+            serv_addr.sin_port = htons(port);
+            
+            struct hostent *he = gethostbyname(host.c_str());
+            if (he == NULL) {
+                std::cerr << "Failed to resolve host." << std::endl;
+                return false;
+            }
+            struct in_addr **addr_list = (struct in_addr **) he->h_addr_list;
+            serv_addr.sin_addr = *addr_list[0];
 
-        if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-            std::cerr << "Failed to connect to pool: " << host << ":" << port << std::endl;
-            return false;
-        }
+            if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+                std::cerr << "Failed to connect to pool: " << host << ":" << port << std::endl;
+                return false;
+            }
 
-        connected = true;
+            connected = true;
+        } // Unlock net_mutex before calling sendLine
+
         std::cout << "Connected to stratum pool." << std::endl;
         
         // Send initial protocol messages
@@ -151,7 +154,7 @@ public:
 
             std::cout << "\r[MINER] Speed: " 
                       << std::fixed << std::setprecision(2) << (hashes_per_second / 1000.0) 
-                      << " kH/s (" << (hashes_per_second / 1000000.0) << " MH/s)  " 
+                      << " kH/s (" << (hashes_per_second / 1000000.0) << " MH/s)        " 
                       << std::flush;
 
             last_hashes = current_hashes;
@@ -241,6 +244,8 @@ public:
                             memcpy(&global_state.PrevHeader[i*8], &v, 8);
                         }
 
+                        std::cout << "\n[POOL] Received new job: " << job_id << std::endl;
+
                         // Generate the CPU heavy Matrix
                         generateHoohashMatrix(global_state.PrevHeader, global_state.mat);
                         job_ready = true;
@@ -253,8 +258,8 @@ public:
                     else if (j.contains("method") && j["method"] == "mining.set_difficulty") {
                         std::cout << "\n[POOL] Difficulty updated to: " << j["params"][0] << std::endl;
                     }
-                } catch (...) {
-                    // JSON parsing failed, likely partial line, put back into overflow
+                } catch (const std::exception& e) {
+                    std::cerr << "\n[JSON ERROR] " << e.what() << " on line: " << line << std::endl;
                     overflow = line;
                 }
             }
