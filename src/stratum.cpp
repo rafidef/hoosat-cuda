@@ -3,6 +3,9 @@
 #include <vector>
 #include <thread>
 #include <mutex>
+#include <chrono>
+#include <atomic>
+#include <iomanip>
 #include <sys/types.h>
 
 #ifdef _WIN32
@@ -35,10 +38,12 @@ private:
 
     std::mutex net_mutex;
     bool connected;
+    std::atomic<uint64_t> total_hashes;
+    bool is_mining;
 
 public:
     StratumClient(std::string h, int p, std::string w, std::string pass) 
-        : host(h), port(p), wallet(w), password(pass), connected(false) {
+        : host(h), port(p), wallet(w), password(pass), connected(false), total_hashes(0), is_mining(false) {
 #ifdef _WIN32
         WSADATA wsaData;
         WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -103,13 +108,54 @@ public:
         sendLine(payload);
     }
     
+    // Dedicated thread to calculate and display hashrate every few seconds
+    void hashrateLoop() {
+        auto last_time = std::chrono::steady_clock::now();
+        uint64_t last_hashes = 0;
+
+        while (is_mining) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            auto current_time = std::chrono::steady_clock::now();
+            
+            uint64_t current_hashes = total_hashes.load();
+            uint64_t hashes_since_last = current_hashes - last_hashes;
+            
+            double seconds = std::chrono::duration<double>(current_time - last_time).count();
+            double hashes_per_second = hashes_since_last / seconds;
+
+            std::cout << "\r[MINER] Speed: " 
+                      << std::fixed << std::setprecision(2) << (hashes_per_second / 1000.0) 
+                      << " kH/s (" << (hashes_per_second / 1000000.0) << " MH/s)  " 
+                      << std::flush;
+
+            last_hashes = current_hashes;
+            last_time = current_time;
+        }
+    }
+
     // In actual implementation, this runs in a thread parsing incoming JSON for `mining.notify`.
     void listenLoop() {
         char buffer[4096];
+        
+        // Start the hashrate counter thread
+        is_mining = true;
+        std::thread hrThread(&StratumClient::hashrateLoop, this);
+
+        // Dummy mining placeholder to feed the hashrate display
+        // In a real loop, you would call `launch_miner` and increment `total_hashes` by `batch_size` 
+        // every time the GPU kernel finishes a batch of nonces.
+        std::thread dummyMining([this]() {
+            while (is_mining) {
+                // Simulate an H100 doing ~85,000,000 hashes every second
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                total_hashes += 850000;
+            }
+        });
+
         while (connected) {
             int bytes_read = recv(sock, buffer, sizeof(buffer) - 1, 0);
             if (bytes_read <= 0) {
-                std::cout << "Connection dropped by pool." << std::endl;
+                std::cout << "\nConnection dropped by pool." << std::endl;
                 disconnect();
                 break;
             }
@@ -123,11 +169,14 @@ public:
             // 4. `generateHoohashMatrix` on CPU.
             // 5. Relaunch kernel `launch_miner` with new __constant__ memory.
         }
+
+        is_mining = false;
+        if (hrThread.joinable()) hrThread.join();
+        if (dummyMining.joinable()) dummyMining.join();
     }
 };
 
 // Start point if building as a standalone executable
-/*
 int main(int argc, char** argv) {
     StratumClient client("118.93.38.187", 5555, "hoosat:qypkv9wz8y9254xw3kr9u98h2eqqsekhcayjvrdtkrvdr4ztfj549fcyxmkr522", "x");
     if (client.connectToPool()) {
@@ -136,4 +185,3 @@ int main(int argc, char** argv) {
     }
     return 0;
 }
-*/

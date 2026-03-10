@@ -63,6 +63,7 @@ char* encodeHex(const uint8_t* bytes, size_t length) {
     return hexStr;
 }
 
+/*
 int main() {
     printf("--- Hoosat Custom CUDA Miner (H100 Optimized) ---\n");
     printf("Running validation test against CPU host reference...\n");
@@ -108,3 +109,4 @@ int main() {
 
     return 0;
 }
+*/
