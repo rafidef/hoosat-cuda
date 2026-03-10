@@ -43,16 +43,23 @@ private:
     std::atomic<uint64_t> total_hashes;
     bool is_mining;
     
+    // UI Stats
+    std::atomic<uint64_t> accepted_shares;
+    std::atomic<uint64_t> rejected_shares;
+    
     // Mining state
     State global_state;
     std::string current_job_id;
+    double pool_difficulty;
+    uint64_t global_target64;
     std::mutex state_mutex;
     bool job_ready;
     uint32_t rpc_id;
 
 public:
     StratumClient(std::string h, int p, std::string w, std::string pass) 
-        : host(h), port(p), wallet(w), password(pass), connected(false), total_hashes(0), is_mining(false), job_ready(false), rpc_id(10) {
+        : host(h), port(p), wallet(w), password(pass), connected(false), total_hashes(0), is_mining(false), 
+          accepted_shares(0), rejected_shares(0), pool_difficulty(1.0), global_target64(0x00000000FFFF0000ULL), job_ready(false), rpc_id(10) {
 #ifdef _WIN32
         WSADATA wsaData;
         WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -134,7 +141,15 @@ public:
         j["method"] = "mining.submit";
         j["params"] = {wallet, job, nonce};
         sendLine(j.dump());
-        std::cout << "\n[MINER] >> Submitted Share [Nonce: " << nonce << "] for Job " << job << "!" << std::endl;
+        // Silent submission, UI loop handles display
+    }
+
+    std::string currentTime() {
+        auto now = std::chrono::system_clock::now();
+        auto in_time_t = std::chrono::system_clock::to_time_t(now);
+        std::stringstream ss;
+        ss << std::put_time(std::localtime(&in_time_t), "%H:%M:%S");
+        return ss.str();
     }
 
     // Dedicated thread to calculate and display hashrate every few seconds
@@ -151,11 +166,17 @@ public:
             
             double seconds = std::chrono::duration<double>(current_time - last_time).count();
             double hashes_per_second = hashes_since_last / seconds;
-
-            std::cout << "\r[MINER] Speed: " 
-                      << std::fixed << std::setprecision(2) << (hashes_per_second / 1000.0) 
-                      << " kH/s (" << (hashes_per_second / 1000000.0) << " MH/s)        " 
-                      << std::flush;
+            double mh_s = hashes_per_second / 1000000.0;
+            
+            std::string t = "[" + currentTime() + "]";
+            std::cout << "\r" << std::string(80, ' ') << "\r"; // clear line
+            std::cout << t << " ===============================================================================" << "\n";
+            std::cout << t << " | Device ID       | Hashrate     | Accepted shares | Stale shares  | Rejected shares |" << "\n";
+            std::cout << t << " | GPU[BUS_ID: 0]  | " << std::fixed << std::setprecision(2) << std::setw(6) << mh_s << " MH/s   | " 
+                      << std::left << std::setw(15) << accepted_shares.load() 
+                      << " | " << std::setw(13) << 0 
+                      << " | " << std::setw(15) << rejected_shares.load() << " |\n";
+            std::cout << t << " ===============================================================================" << std::endl;
 
             last_hashes = current_hashes;
             last_time = current_time;
@@ -165,6 +186,7 @@ public:
     void gpuMiningLoop() {
         State local_state;
         std::string local_job;
+        uint64_t local_target64;
         uint64_t current_nonce = 0;
         
         while (is_mining) {
@@ -178,6 +200,7 @@ public:
                 std::lock_guard<std::mutex> lock(state_mutex);
                 local_state = global_state;
                 local_job = current_job_id;
+                local_target64 = global_target64;
             }
 
             bool found_flag = false;
@@ -186,7 +209,7 @@ public:
             uint64_t batch_size = 500000; // Optimal batch size for H100
             
             // Execute the CUDA Kernel!
-            launch_miner(&local_state, current_nonce, batch_size, &found_flag, &found_nonce, found_hash);
+            launch_miner(&local_state, current_nonce, batch_size, local_target64, &found_flag, &found_nonce, found_hash);
             
             total_hashes += batch_size;
             current_nonce += batch_size;
@@ -244,19 +267,21 @@ public:
                             memcpy(&global_state.PrevHeader[i*8], &v, 8);
                         }
 
-                        std::cout << "\n[POOL] Received new job: " << job_id << std::endl;
-
                         // Generate the CPU heavy Matrix
                         generateHoohashMatrix(global_state.PrevHeader, global_state.mat);
                         job_ready = true;
                     } 
-                    else if (j.contains("result") && j.contains("id")) {
+                    else if (j.contains("result") && j.contains("id") && !j["result"].is_null()) {
                         if (j["result"] == true) {
-                            // std::cout << "\n[POOL] Accept response received." << std::endl;
+                            accepted_shares++;
+                        } else {
+                            rejected_shares++;
                         }
                     }
                     else if (j.contains("method") && j["method"] == "mining.set_difficulty") {
-                        std::cout << "\n[POOL] Difficulty updated to: " << j["params"][0] << std::endl;
+                        std::lock_guard<std::mutex> lock(state_mutex);
+                        pool_difficulty = j["params"][0].get<double>();
+                        global_target64 = (uint64_t)(((double)0x00000000FFFF0000ULL) / pool_difficulty);
                     }
                 } catch (const std::exception& e) {
                     std::cerr << "\n[JSON ERROR] " << e.what() << " on line: " << line << std::endl;

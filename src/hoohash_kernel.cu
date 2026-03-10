@@ -158,6 +158,7 @@ __global__ void hoohash_miner_kernel(
     const uint8_t* __restrict__ prevHeader, 
     uint64_t timestamp, 
     uint64_t start_nonce, 
+    uint64_t target64,
     bool* __restrict__ found_flag, 
     uint64_t* __restrict__ found_nonce, 
     uint8_t* __restrict__ found_hash
@@ -189,14 +190,14 @@ __global__ void hoohash_miner_kernel(
     uint8_t lastPass[32];
     HoohashMatrixMultiplication(firstPass, lastPass, thread_nonce);
 
-    // 3. Evaluate Target (Assuming target is provided via pool/stratum logic outside. We will check leading zeroes here temporarily as an example)
-    // For now, let's just write the result back for validation test. In real miner, it checks network difficulty.
-    // We will pass difficulty as another kernel argument in the final phase, but right now we capture all for testing or target matches.
+    // 3. Evaluate Target (assuming little-endian format, extract top 64 bits from the 32-byte hash)
+    uint64_t hash64 = 0;
+    for(int i = 0; i < 8; i++) {
+        hash64 |= ((uint64_t)lastPass[24 + i]) << (i * 8);
+    }
     
-    // Dummy check: e.g. finding 2 leading zero bytes.
-    // For validation phase, we forcibly write the hash out if thread_id == 0
-    // so we can compare it byte against byte with the CPU test cases.
-    if (thread_id == 0 || (lastPass[0] == 0x00 && lastPass[1] == 0x00)) {
+    // Check against standard difficulty target
+    if (hash64 <= target64) {
         if (atomicExch((int*)found_flag, 1) == 0) {
             *found_nonce = thread_nonce;
             for(int i = 0; i < 32; i++) found_hash[i] = lastPass[i];
@@ -207,7 +208,7 @@ __global__ void hoohash_miner_kernel(
 // -------------------------------------------------------------------------
 // CPU LAUNCHER WRAPPER
 // -------------------------------------------------------------------------
-void launch_miner(const State* cpu_state, uint64_t start_nonce, uint64_t batch_size, bool* found_flag, uint64_t* found_nonce, uint8_t* found_hash) {
+void launch_miner(const State* cpu_state, uint64_t start_nonce, uint64_t batch_size, uint64_t target64, bool* found_flag, uint64_t* found_nonce, uint8_t* found_hash) {
     // Copy Matrix to __constant__ memory
     cudaMemcpyToSymbol(d_mat, cpu_state->mat, sizeof(double) * 64 * 64);
     
@@ -232,6 +233,7 @@ void launch_miner(const State* cpu_state, uint64_t start_nonce, uint64_t batch_s
         d_prevHeader,
         cpu_state->Timestamp,
         start_nonce,
+        target64,
         d_found_flag,
         d_found_nonce,
         d_found_hash
