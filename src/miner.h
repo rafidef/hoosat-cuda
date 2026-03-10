@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 
 #define DOMAIN_HASH_SIZE 32
 
